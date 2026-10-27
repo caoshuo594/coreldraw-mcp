@@ -146,6 +146,45 @@ def create_line(x1: float, y1: float, x2: float, y2: float, top_left: bool = Tru
 
 
 
+def _import_asset(path, *, x=0, y=0, width=0, height=0):
+    """Import on the active layer and identify newly created objects by StaticID.
+
+    X8 exposes ImportEx on Layer, not Document.Import. Never reposition Shapes.Last:
+    Corel inserts at the front of the stack and that object can predate the import.
+    """
+    import os
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"文件不存在: {path}")
+    conn = get_connection()
+    doc = conn.app.ActiveDocument
+    doc.Unit = 3
+    page = doc.ActivePage
+    layer = page.ActiveLayer
+    before = {str(page.Shapes.Item(i).StaticID) for i in range(1, page.Shapes.Count + 1)}
+    importer = layer.ImportEx(path, 0, conn.app.CreateStructImportOptions())
+    if importer is None:
+        raise RuntimeError("ImportEx did not return an import filter")
+    importer.Finish()
+    added = [page.Shapes.Item(i) for i in range(1, page.Shapes.Count + 1)
+             if str(page.Shapes.Item(i).StaticID) not in before]
+    if not added:
+        raise RuntimeError("Import finished without creating any page objects")
+    shape = added[0] if len(added) == 1 else _create_shape_range(added).Group()
+    if shape is None:
+        raise RuntimeError("Unable to group the imported objects")
+    if width > 0 and height > 0:
+        shape.SetSize(width, height)
+    if x != 0 or y != 0:
+        old_reference = doc.ReferencePoint
+        try:
+            doc.ReferencePoint = 5  # cdrBottomLeft, legacy native coordinates
+            shape.SetPosition(x, y)
+        finally:
+            doc.ReferencePoint = old_reference
+    return {"path": path, "shape_id": _static_id(shape), **_shape_info(shape),
+            "imported_shape_ids": [_static_id(s) for s in added], "x": x, "y": y}
+
+
 def import_svg(path: str, x: float = 0, y: float = 0) -> ToolResult:
     """导入 SVG 文件到当前文档。返回导入的形状信息。"""
     conn = get_connection()
@@ -153,21 +192,7 @@ def import_svg(path: str, x: float = 0, y: float = 0) -> ToolResult:
         return ToolResult.fail("CorelDRAW 未连接")
 
     def _import():
-        import os
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"SVG 文件不存在: {path}")
-        doc = conn.app.ActiveDocument
-        doc.Import(path)
-        if x != 0 or y != 0:
-            try:
-                shapes = doc.ActivePage.Shapes
-                if shapes.Count > 0:
-                    last_shape = shapes.Last
-                    last_shape.SetPosition(x, y)
-                    return {"path": path, "shape_id": _static_id(last_shape), **_shape_info(last_shape), "x": x, "y": y}
-            except Exception:
-                pass
-        return {"path": path, "status": "imported"}
+        return _import_asset(path, x=x, y=y)
 
     result = conn.safe_call(_import)
     if result["success"]:
@@ -182,23 +207,7 @@ def import_image(path: str, x: float = 0, y: float = 0, width: float = 0, height
         return ToolResult.fail("CorelDRAW 未连接")
 
     def _import():
-        import os
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"图片文件不存在: {path}")
-        doc = conn.app.ActiveDocument
-        doc.Import(path)
-        try:
-            shapes = doc.ActivePage.Shapes
-            if shapes.Count > 0:
-                last_shape = shapes.Last
-                if x != 0 or y != 0:
-                    last_shape.SetPosition(x, y)
-                if width > 0 and height > 0:
-                    last_shape.SetSize(width, height)
-                return {"path": path, "shape_id": _static_id(last_shape), **_shape_info(last_shape), "x": x, "y": y}
-        except Exception:
-            pass
-        return {"path": path, "status": "imported"}
+        return _import_asset(path, x=x, y=y, width=width, height=height)
 
     result = conn.safe_call(_import)
     if result["success"]:

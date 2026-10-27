@@ -36,7 +36,8 @@ def open_document(path: str) -> ToolResult:
         return live._error(exc, "OPEN_FAILED")
 
 
-def verify_saved_document(path: str, preview_path: str = "", width_px: int = 1200) -> ToolResult:
+def verify_saved_document(path: str, preview_path: str = "", width_px: int = 1200,
+                          preview_scope: str = "page", padding_mm: float = 0) -> ToolResult:
     """Reopen an isolated byte-identical copy of saved CDR; report pages, units, scale, editable text/font/overflow.
 
     Does not save/close the user's open document. Optional PNG is rendered from the reopened disk copy.
@@ -81,12 +82,14 @@ def verify_saved_document(path: str, preview_path: str = "", width_px: int = 120
                                 texts.append(item)
                     if dest:
                         doc.Pages(1).Activate()
-                        result = live.export_tools.export_preview_png(str(dest), width_px=width_px)
+                        result = live.export_tools.export_preview_png(str(dest), width_px=width_px,
+                                                                     scope=preview_scope, padding_mm=padding_mm)
                         if not result.success:
                             raise RuntimeError(result.error)
                     return {"source": str(source), "sha256": digest, "verification_mode": "reopened_byte_copy",
                             "opened_unit": original_unit, "ruler_units": ruler_units, "inspection_unit": "mm", "pages": pages,
                             "editable_texts": texts, "preview": str(dest) if dest else None,
+                            "preview_scope": preview_scope,
                             "overflow_count": sum(t["overflow"] is True for t in texts)}
                 finally:
                     doc.Dirty = False  # Only the disposable verification copy.

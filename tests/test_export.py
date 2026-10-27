@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
@@ -127,6 +128,64 @@ class ExportTests(unittest.TestCase):
         self.assertTrue(result.success, result.error)
         self.assertEqual(before, after)
         self.assertEqual(self.conn.doc.clear_selection_calls, 0)
+
+    def test_artwork_bounds_include_external_objects_but_exclude_hidden_layers(self):
+        visible = SimpleNamespace(Visible=True, Printable=True)
+        hidden = SimpleNamespace(Visible=False, Printable=True)
+        def box(layer, left, bottom, right, top):
+            return SimpleNamespace(Layer=layer, LeftX=left, BottomY=bottom, RightX=right, TopY=top)
+        self.conn.doc.ActivePage.Shapes = Collection([
+            box(visible, 10, 20, 30, 40), box(visible, 260, -5, 280, 25),
+            box(hidden, -500, -500, 500, 500),
+        ])
+        old_size = (self.conn.doc.ActivePage.SizeWidth, self.conn.doc.ActivePage.SizeHeight)
+        rect, width, height = export_tools._export_geometry(self.conn.app, self.conn.doc, "artwork", 2)
+        self.assertEqual(rect, (8, -7, 274, 49))
+        self.assertEqual((width, height), (274, 49))
+        self.assertEqual(old_size, (self.conn.doc.ActivePage.SizeWidth, self.conn.doc.ActivePage.SizeHeight))
+
+    def test_artwork_export_failure_never_falls_back_to_cropped_page(self):
+        layer = SimpleNamespace(Visible=True, Printable=True)
+        self.conn.doc.ActivePage.Shapes = Collection([
+            SimpleNamespace(Layer=layer, LeftX=260, BottomY=10, RightX=280, TopY=30)
+        ])
+        def fail(*args):
+            raise RuntimeError("bounds unsupported")
+        self.conn.doc.ExportBitmap = fail
+        for fn, name in [(export_tools.export_preview_png, "fail.png"),
+                         (export_tools.export_png, "fail2.png"),
+                         (export_tools.export_jpeg, "fail.jpg")]:
+            result = fn(self.path(name), scope="artwork")
+            self.assertFalse(result.success)
+            self.assertFalse(Path(self.path(name)).exists())
+
+    def test_invalid_or_empty_artwork_scope_is_rejected(self):
+        with self.assertRaises(ValueError):
+            export_tools._export_geometry(self.conn.app, self.conn.doc, "unknown")
+        with self.assertRaises(ValueError):
+            export_tools._export_geometry(self.conn.app, self.conn.doc, "page", -1)
+        self.conn.doc.ActivePage.Shapes = Collection([])
+        result = export_tools.export_preview_png(self.path("empty.png"), scope="artwork")
+        self.assertFalse(result.success)
+
+    def test_workspace_uses_temporary_copy_route_for_all_raster_exports(self):
+        original = export_tools._workspace_export
+        calls = []
+        def temporary_export(conn, path, exporter, padding_mm, **options):
+            calls.append((exporter.__name__, padding_mm))
+            Path(path).write_bytes(b"workspace")
+            return {"scope": "workspace", "source_object_count": 4}
+        export_tools._workspace_export = temporary_export
+        try:
+            for fn, name in [(export_tools.export_preview_png, "workspace.png"),
+                             (export_tools.export_png, "workspace2.png"),
+                             (export_tools.export_jpeg, "workspace.jpg")]:
+                result = fn(self.path(name), scope="workspace", padding_mm=4)
+                self.assertTrue(result.success, result.error)
+                self.assertEqual(result.data["scope"], "workspace")
+            self.assertEqual(calls, [("export_preview_png", 4), ("export_png", 4), ("export_jpeg", 4)])
+        finally:
+            export_tools._workspace_export = original
 
 
 if __name__ == "__main__":

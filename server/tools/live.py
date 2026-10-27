@@ -216,8 +216,14 @@ def render_preview(
     destination_path: str,
     width_px: int = 800,
     overwrite: bool = False,
+    scope: str = "page",
+    padding_mm: float = 0,
 ) -> ToolResult:
-    """Render the attached document page to a PNG without saving or changing the CDR file."""
+    """Preview page or artwork bounds without changing the CDR page or object positions.
+
+    scope='artwork' includes page-external visible printable objects.
+    scope='workspace' also includes visible Desktop objects via a temporary copy.
+    """
     try:
         path = _validated_destination(
             destination_path,
@@ -226,7 +232,8 @@ def render_preview(
         )
 
         def _preview(doc):
-            result = export_tools.export_preview_png(str(path), width_px=width_px)
+            result = export_tools.export_preview_png(str(path), width_px=width_px,
+                                                     scope=scope, padding_mm=padding_mm)
             if not result.success:
                 raise RuntimeError(result.error or "Preview export failed")
             return result.data or {"path": str(path)}
@@ -248,13 +255,26 @@ def export_document(
     destination_path: str,
     dpi: int = 300,
     overwrite: bool = False,
+    scope: str = "page",
+    padding_mm: float = 0,
 ) -> ToolResult:
-    """Export the attached document as pdf, dxf, svg, png, or jpeg without changing its CDR path."""
+    """Export without changing the source page or CDR path.
+
+    Non-page scopes support PNG/JPEG. 'artwork' covers visible printable objects;
+    'workspace' also includes visible Desktop objects via a temporary copy.
+    PDF/SVG/DXF currently require page scope or a temporary export document.
+    """
     try:
         fmt = format.strip().lower()
         allowed = {"pdf", "dxf", "svg", "png", "jpeg", "jpg"}
         if fmt not in allowed:
             raise ValueError(f"Unsupported export format: {fmt}")
+        if scope not in {"page", "artwork", "workspace"}:
+            raise ValueError("scope must be 'page', 'artwork', or 'workspace'")
+        if scope != "page" and fmt not in {"png", "jpeg", "jpg"}:
+            raise ValueError("Non-page bounds currently support PNG/JPEG. For PDF/SVG/DXF, "
+                             "set an explicit output range in a temporary export document; "
+                             "the editable source page must remain unchanged.")
         expected_suffix = ".jpg" if fmt == "jpg" else f".{fmt}"
         accepted_suffixes = {expected_suffix}
         if fmt in {"jpeg", "jpg"}:
@@ -273,9 +293,9 @@ def export_document(
             elif fmt == "svg":
                 result = export_tools.export_svg(str(path))
             elif fmt == "png":
-                result = export_tools.export_png(str(path), dpi=dpi)
+                result = export_tools.export_png(str(path), dpi=dpi, scope=scope, padding_mm=padding_mm)
             else:
-                result = export_tools.export_jpeg(str(path), dpi=dpi)
+                result = export_tools.export_jpeg(str(path), dpi=dpi, scope=scope, padding_mm=padding_mm)
             if not result.success:
                 raise RuntimeError(result.error or f"{fmt} export failed")
             return result.data or {"path": str(path), "format": fmt}

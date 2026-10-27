@@ -46,6 +46,36 @@ list_feature_tools(name="create_rectangle")
 
 常规编辑优先使用 `apply_operations`。部分高级工具沿用原生坐标，先用查询结果和已知对象确认。
 
+## 单页工作区与导出范围
+
+页面框不限制可编辑内容的摆放范围。`render_preview` 与 PNG/JPEG 的 `export_document` 支持以下 `scope`；保存验收的预览使用对应的 `preview_scope`。
+
+| 范围 | 包含内容 | 执行方式 |
+| --- | --- | --- |
+| `page`（默认） | 页面矩形范围 | 保持原来的页面输出行为 |
+| `artwork` | 当前页可见、可打印对象，包含符合条件的框外对象 | 按对象整体包围范围输出 |
+| `workspace` | 可见可打印对象，以及可见桌面层对象 | 逐个复制根对象到临时文档输出，随后关闭临时文档 |
+
+`padding_mm` 指定图上毫米留边。`workspace` 会使用剪贴板，不修改源页面尺寸、对象位置或桌面层打印开关，也不包含隐藏层和普通不可打印层。
+
+```json
+{
+  "session_id": "从绑定结果读取",
+  "destination_path": "D:\\Projects\\preview.png",
+  "width_px": 1600,
+  "scope": "workspace",
+  "padding_mm": 4
+}
+```
+
+X8 可能在保存或重开后把框外对象转入不可打印的共享桌面层；对象计数正确不代表页面范围预览包含全部内容。含桌面内容的设计应使用 `workspace` 并检查保存重开的完整预览。单独把对象移回本地图层后，不能仅凭内存状态认定已解决。
+
+PDF/SVG/DXF 的核心导出入口仍使用页面范围；传入非页面范围会明确报错。需要框外内容的矢量输出时，在临时导出文档中设置实际输出范围，不为导出而改变源工作区。升级代码后需重新连接 MCP，才能加载新增参数与实现。
+
+## X8 素材导入
+
+`import_svg` 和 `import_image` 使用 X8 支持的图层 `ImportEx` / `Finish` 接口。新增对象按导入前后的 StaticID 差集识别，避免把旧对象当成导入结果。多个新对象按明确范围组合；只有一个对象时保留该对象，不调用单对象分组。
+
 ## 73 项高级功能
 
 下面的分类清单由 [feature_catalog.json](../server/feature_catalog.json) 生成，函数实现位于 `server/tools/` 对应模块。

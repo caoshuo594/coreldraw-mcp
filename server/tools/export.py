@@ -102,6 +102,113 @@ def _page_export_area(app, doc):
         return None
 
 
+def _export_geometry(app, doc, scope="page", padding_mm=0):
+    """Choose page or visible/printable artwork bounds without editing the page.
+
+    Artwork bounds include objects outside the page. Padding is explicit and also
+    provides room for outlines extending beyond the geometric object bounds.
+    """
+    if scope not in {"page", "artwork"}:
+        raise ValueError("scope must be 'page' or 'artwork'")
+    if padding_mm < 0:
+        raise ValueError("padding_mm cannot be negative")
+    if scope == "page":
+        width, height = _page_size_mm(doc)
+        return _page_export_area(app, doc), width, height
+    doc.Unit = _CDR_MILLIMETER
+    boxes = []
+    for shape in doc.ActivePage.Shapes:
+        layer = shape.Layer
+        if not layer.Visible or not layer.Printable:
+            continue
+        boxes.append((float(shape.LeftX), float(shape.BottomY),
+                      float(shape.RightX), float(shape.TopY)))
+    if not boxes:
+        raise ValueError("No visible printable artwork exists on the active page")
+    left = min(b[0] for b in boxes) - padding_mm
+    bottom = min(b[1] for b in boxes) - padding_mm
+    right = max(b[2] for b in boxes) + padding_mm
+    top = max(b[3] for b in boxes) + padding_mm
+    width, height = right - left, top - bottom
+    if width <= 0 or height <= 0:
+        raise ValueError("Artwork export bounds must have positive width and height")
+    return app.CreateRect(left, bottom, width, height), width, height
+
+
+def _workspace_export(conn, path, exporter, padding_mm, **options):
+    """Export visible printable artwork plus visible Desktop objects via a copy.
+
+    X8 can move external objects back to its non-printable Desktop layer on save.
+    Copy only the requested workspace into a disposable document; never enable
+    printing on the source Desktop layer or resize/reposition the source artwork.
+    """
+    if padding_mm < 0:
+        raise ValueError("padding_mm cannot be negative")
+    app = conn.app
+    source = app.ActiveDocument
+    source_page = source.ActivePage
+    old_unit = source.Unit
+    source.Unit = _CDR_MILLIMETER
+    temporary = None
+    try:
+        selected = []
+        for i in range(1, source_page.Shapes.Count + 1):
+            shape = source_page.Shapes.Item(i)
+            layer = shape.Layer
+            if layer.Visible and (layer.Printable or layer.IsDesktopLayer):
+                selected.append(shape)
+        if not selected:
+            raise ValueError("No visible workspace artwork exists")
+        boxes = [(float(s.LeftX), float(s.BottomY), float(s.RightX), float(s.TopY)) for s in selected]
+        left, bottom = min(b[0] for b in boxes), min(b[1] for b in boxes)
+        width = max(b[2] for b in boxes) - left + padding_mm * 2
+        height = max(b[3] for b in boxes) - bottom + padding_mm * 2
+        if width <= 0 or height <= 0:
+            raise ValueError("Workspace export bounds must be positive")
+        temporary = app.CreateDocument()
+        temporary.Activate()
+        temporary.Unit = _CDR_MILLIMETER
+        temporary.WorldScale = source.WorldScale
+        temporary.ActivePage.SetSize(width, height)
+        layer = temporary.ActivePage.CreateLayer("Temporary workspace export")
+        layer.Activate()
+        for shape, box in zip(selected, boxes):
+            source.Activate()
+            source_page.Activate()
+            shape.Copy()  # X8 cannot copy one mixed local/Desktop ShapeRange.
+            temporary.Activate()
+            layer.Activate()
+            page = temporary.ActivePage
+            before = {str(page.Shapes.Item(i).StaticID) for i in range(1, page.Shapes.Count + 1)}
+            layer.Paste()
+            added = [page.Shapes.Item(i) for i in range(1, page.Shapes.Count + 1)
+                     if str(page.Shapes.Item(i).StaticID) not in before]
+            if len(added) != 1:
+                raise RuntimeError("Workspace root object did not paste as one object")
+            pasted = added[0]
+            pasted.LeftX = box[0] - left + padding_mm
+            pasted.TopY = box[3] - bottom + padding_mm
+            pasted.MoveToLayer(layer)
+        layer.Printable = True
+        temporary.Activate()
+        temporary.ActivePage.Activate()
+        temporary.Unit = _CDR_MILLIMETER
+        if app.ActiveDocument.Name != temporary.Name:
+            raise RuntimeError("Unable to activate the temporary workspace export document")
+        result = exporter(path, scope="page", **options)
+        if not result.success:
+            raise RuntimeError(result.error or "Workspace export failed")
+        return {**(result.data or {}), "scope": "workspace", "source_object_count": len(selected),
+                "workspace_width_mm": width, "workspace_height_mm": height}
+    finally:
+        if temporary is not None:
+            temporary.Dirty = False
+            temporary.Close()
+        source.Activate()
+        source_page.Activate()
+        source.Unit = old_unit
+
+
 def export_pdf(
     path: str,
     color_profile: str = "ISO_Coated_v2",
@@ -264,19 +371,23 @@ def export_svg(path: str) -> ToolResult:
     return ToolResult.fail(result.get("error", "SVG export failed"))
 
 
-def export_png(path: str, dpi: int = 300, width: int = 0, background_transparent: bool = False) -> ToolResult:
-    """Export PNG with DPI, width, and transparency options."""
+def export_png(path: str, dpi: int = 300, width: int = 0, background_transparent: bool = False,
+               scope: str = "page", padding_mm: float = 0) -> ToolResult:
+    """Export PNG with page, artwork (printable), or workspace (also Desktop) scope."""
     conn = get_connection()
     if not conn.status.connected:
         return ToolResult.fail("CorelDRAW is not connected")
     output_path = _ensure_dir(path)
 
     def _export():
+        if scope == "workspace":
+            return _workspace_export(conn, output_path, export_png, padding_mm,
+                                     dpi=dpi, width=width, background_transparent=background_transparent)
         doc = conn.app.ActiveDocument
         if not doc:
             raise RuntimeError("No document is open in CorelDRAW")
         shapes_count = _prepare_current_page_export(doc)
-        page_w_mm, page_h_mm = _page_size_mm(doc)
+        export_area, page_w_mm, page_h_mm = _export_geometry(conn.app, doc, scope, padding_mm)
         if width > 0 and page_w_mm > 0:
             export_dpi = int(width / (page_w_mm / 25.4))
         else:
@@ -291,7 +402,6 @@ def export_png(path: str, dpi: int = 300, width: int = 0, background_transparent
 
         exported = False
         try:
-            export_area = _page_export_area(conn.app, doc)
             expflt = doc.ExportBitmap(
                 output_path,
                 _CDR_PNG,
@@ -313,7 +423,8 @@ def export_png(path: str, dpi: int = 300, width: int = 0, background_transparent
             _finish_export_filter(expflt)
             exported = True
         except Exception:
-            pass
+            if scope != "page":
+                raise  # Never silently fall back to a cropped page export.
 
         if not exported:
             doc.Export(output_path, _CDR_PNG, _CDR_CURRENT_PAGE, None, None)
@@ -325,6 +436,7 @@ def export_png(path: str, dpi: int = 300, width: int = 0, background_transparent
             "width_px": pixel_w,
             "height_px": pixel_h,
             "format": "png",
+            "scope": scope,
             "shapes_count": shapes_count,
             "file_size": file_size,
         }
@@ -335,19 +447,22 @@ def export_png(path: str, dpi: int = 300, width: int = 0, background_transparent
     return ToolResult.fail(result.get("error", "PNG export failed"))
 
 
-def export_jpeg(path: str, quality: int = 85, dpi: int = 300) -> ToolResult:
-    """Export JPEG with quality and resolution options."""
+def export_jpeg(path: str, quality: int = 85, dpi: int = 300,
+                scope: str = "page", padding_mm: float = 0) -> ToolResult:
+    """Export JPEG with page, artwork (printable), or workspace (also Desktop) scope."""
     conn = get_connection()
     if not conn.status.connected:
         return ToolResult.fail("CorelDRAW is not connected")
     output_path = _ensure_dir(path)
 
     def _export():
+        if scope == "workspace":
+            return _workspace_export(conn, output_path, export_jpeg, padding_mm, quality=quality, dpi=dpi)
         doc = conn.app.ActiveDocument
         if not doc:
             raise RuntimeError("No document is open in CorelDRAW")
         shapes_count = _prepare_current_page_export(doc)
-        page_w_mm, page_h_mm = _page_size_mm(doc)
+        export_area, page_w_mm, page_h_mm = _export_geometry(conn.app, doc, scope, padding_mm)
         if page_w_mm > 0 and page_h_mm > 0:
             pixel_w = max(1, int(page_w_mm / 25.4 * dpi))
             pixel_h = max(1, int(page_h_mm / 25.4 * dpi))
@@ -357,7 +472,6 @@ def export_jpeg(path: str, quality: int = 85, dpi: int = 300) -> ToolResult:
 
         exported = False
         try:
-            export_area = _page_export_area(conn.app, doc)
             expflt = doc.ExportBitmap(
                 output_path,
                 _CDR_JPEG,
@@ -384,7 +498,8 @@ def export_jpeg(path: str, quality: int = 85, dpi: int = 300) -> ToolResult:
             _finish_export_filter(expflt)
             exported = True
         except Exception:
-            pass
+            if scope != "page":
+                raise
 
         if not exported:
             doc.Export(output_path, _CDR_JPEG, _CDR_CURRENT_PAGE, None, None)
@@ -397,6 +512,7 @@ def export_jpeg(path: str, quality: int = 85, dpi: int = 300) -> ToolResult:
             "width_px": pixel_w,
             "height_px": pixel_h,
             "format": "jpeg",
+            "scope": scope,
             "shapes_count": shapes_count,
             "file_size": file_size,
         }
@@ -407,8 +523,9 @@ def export_jpeg(path: str, quality: int = 85, dpi: int = 300) -> ToolResult:
     return ToolResult.fail(result.get("error", "JPEG export failed"))
 
 
-def export_preview_png(path: str, width: int = 800, width_px: int = 0) -> ToolResult:
-    """Export a low-resolution PNG preview for visual inspection."""
+def export_preview_png(path: str, width: int = 800, width_px: int = 0,
+                       scope: str = "page", padding_mm: float = 0) -> ToolResult:
+    """Preview page, printable artwork, or workspace including visible Desktop objects."""
     if width_px > 0:
         width = width_px
     conn = get_connection()
@@ -417,11 +534,13 @@ def export_preview_png(path: str, width: int = 800, width_px: int = 0) -> ToolRe
     output_path = _ensure_dir(path)
 
     def _export():
+        if scope == "workspace":
+            return _workspace_export(conn, output_path, export_preview_png, padding_mm, width=width)
         doc = conn.app.ActiveDocument
         if not doc:
             raise RuntimeError("No document is open in CorelDRAW")
         shapes_count = _prepare_current_page_export(doc)
-        page_w_mm, page_h_mm = _page_size_mm(doc)
+        export_area, page_w_mm, page_h_mm = _export_geometry(conn.app, doc, scope, padding_mm)
         if page_w_mm > 0:
             export_dpi = int(width / (page_w_mm / 25.4))
         else:
@@ -436,7 +555,6 @@ def export_preview_png(path: str, width: int = 800, width_px: int = 0) -> ToolRe
 
         exported = False
         try:
-            export_area = _page_export_area(conn.app, doc)
             expflt = doc.ExportBitmap(
                 output_path,
                 _CDR_PNG,
@@ -458,7 +576,8 @@ def export_preview_png(path: str, width: int = 800, width_px: int = 0) -> ToolRe
             _finish_export_filter(expflt)
             exported = True
         except Exception:
-            pass
+            if scope != "page":
+                raise
 
         if not exported:
             doc.Export(output_path, _CDR_PNG, _CDR_CURRENT_PAGE, None, None)
@@ -467,6 +586,7 @@ def export_preview_png(path: str, width: int = 800, width_px: int = 0) -> ToolRe
         return {
             "path": output_path,
             "width_px": width,
+            "scope": scope,
             "actual_width_px": pixel_w,
             "actual_height_px": pixel_h,
             "dpi": export_dpi,
