@@ -1,0 +1,14 @@
+fastmcp==2.14.7
+pywin32==312; sys_platform == "win32"
+pydantic==2.14.1
+pydantic-settings==2.16.0
+loguru==0.7.3
+python-dotenv==1.2.4
+psutil==7.2.2
+pandas==3.0.6
+numpy==2.4.6
+openpyxl==3.1.5
+xlrd==2.0.2
+python-barcode==0.16.1
+qrcode==8.2
+Pillow==13.0.0

@@ -1,0 +1,14 @@
+# 示例路径：请改为本包实际解压后的完整绝对路径。
+[mcp_servers.coreldraw]
+command = 'D:\Tools\coreldraw-mcp\.venv\Scripts\python.exe'
+args = ['D:\Tools\coreldraw-mcp\launch.py']
+enabled = true
+startup_timeout_sec = 60
+tool_timeout_sec = 360
+
+[mcp_servers.coreldraw.env]
+COREL_ALLOW_RUNNING_DISPATCH = "1"
+COREL_ATTACH_POLICY = "existing_only"
+COREL_CORELDRAW_APP_NAME = "CorelDRAW.Application.18"
+PYTHONUTF8 = "1"
+PYTHONUNBUFFERED = "1"

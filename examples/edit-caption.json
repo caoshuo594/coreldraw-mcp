@@ -1,0 +1,18 @@
+{
+  "session_id": "replace-with-session-id",
+  "expected_revision": 0,
+  "label": "修改图说",
+  "operations": [
+    {
+      "op": "text.set_content",
+      "shape_id": "replace-with-shape-id",
+      "value": "请保持疏散通道畅通"
+    },
+    {
+      "op": "text.set_style",
+      "shape_id": "replace-with-shape-id",
+      "font_family": "微软雅黑",
+      "font_size_pt": 18
+    }
+  ]
+}
